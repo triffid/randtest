@@ -8,63 +8,69 @@
 
 #include <pthread.h>
 
-const int max = 37;
-const long count = 10000000000;
+const int max = 37;             // number of faces on die
+const long count = 10000000000;  // number of rolls per thread
+const int nthreads = 16;        // number of threads
 
-const int nthreads = 16;
-
-uint64_t* seed;
-uint64_t* hitcount;
-double*   mean;
+typedef struct {
+	// thread itself
+	pthread_t thread;
+	// input to thread
+	unsigned  idx;
+	uint64_t  seed;
+	// output from thread
+	uint64_t* hitcount;
+	double  * mean;
+} threadinfo;
 
 void* threadfn(void* arg) {
-	unsigned myidx = (unsigned long) arg;
+	// get thread index so we know where to pull/push data
+	threadinfo info = *((threadinfo*) arg);
 
 	// localize working data to prevent cache thrashing
-	uint64_t lseed = seed[myidx];
+	uint64_t lseed = info.seed;
 	uint64_t lhitcount[max] = {};
-	double lmean = 0;
+	double   lmean = 0;
 
 	for (unsigned long i = 0; i < count; i++) {
+		// fetch random from PRNG
 		uint32_t rand = ((lseed >> 32) * max) >> 32;
-
-		lhitcount[rand]++;
-
-		lmean += (rand * 1.0) / count;
-
+		// PRNG advance
 		lseed += (lseed * lseed) | 5u;
 
-		if ((i & ((1UL << 26) - 1)) == 0) {
-			fprintf(stderr, "\r[ %2d ] %lu of %lu (%lu%%)\r", myidx, i, count, i * 100 / count);
-		}
+		// tally hit on received value
+		lhitcount[rand]++;
+
+		// update mean
+		lmean += (rand * 1.0) / count;
+
+		// print progress occasionally
+		if ((i & ((1UL << 26) - 1)) == 0)
+			fprintf(stderr, "\r[ %2d ] %lu of %lu (%lu%%)\r", info.idx, i, count, i * 100 / count);
 	}
 
 	// marshall back to main thread, cache thrashing doesn't matter now
-	memcpy(&hitcount[myidx * max], lhitcount, sizeof(lhitcount));
-	mean[myidx] = lmean;
+	memcpy(info.hitcount, lhitcount, sizeof(lhitcount));
+	*info.mean = lmean;
 
 	return (void*) 0;
 }
 
 int main(int argc, char** argv) {
-	seed = malloc(sizeof(seed[0]) * nthreads);
-	hitcount = malloc(sizeof(hitcount[0]) * nthreads * max);
-	mean = malloc(sizeof(mean[0]) * nthreads);
-
-	if (seed == nullptr) return 1;
-	if (hitcount == nullptr) return 1;
-	if (mean == nullptr) return 1;
+	uint64_t seed[nthreads];
+	uint64_t hitcount[nthreads][max];
+	double   mean[nthreads];
 
 	int r = open("/dev/urandom", O_RDONLY);
 	if (r >= 0) {
-		read(r, seed, sizeof(seed[0]) * nthreads);
+		read(r, seed, sizeof(seed));
 		close(r);
 	}
 	else {
 		return 1;
 	}
 
-	pthread_t threads[nthreads];
+	threadinfo threads[nthreads];
 
 	{
 		printf("Using %d threads\n", nthreads);
@@ -72,8 +78,11 @@ int main(int argc, char** argv) {
 		if (pthread_attr_init(&attr) != 0)
 			return 1;
 		for (int i = 0; i < nthreads; i++) {
-			unsigned long arg = i;
-			if (pthread_create(&threads[i], &attr, threadfn, (void*) arg) != 0)
+			threads[i].idx = i;
+			threads[i].seed = seed[i];
+			threads[i].hitcount = hitcount[i];
+			threads[i].mean = &mean[i];
+			if (pthread_create(&threads[i].thread, &attr, threadfn, &threads[i]) != 0)
 				return 1;
 		}
 		pthread_attr_destroy(&attr);
@@ -84,11 +93,10 @@ int main(int argc, char** argv) {
 
 	for (int i = 0; i < nthreads; i++) {
 		void* r;
-		pthread_join(threads[i], &r);
+		pthread_join(threads[i].thread, &r);
 		allmean += mean[i] / nthreads;
-		for (int j = 0; j < max; j++) {
-			allhitcount[j] += hitcount[i * max + j];
-		}
+		for (int j = 0; j < max; j++)
+			allhitcount[j] += hitcount[i][j];
 		//printf("Thread %d finished\n", i);
 	}
 
