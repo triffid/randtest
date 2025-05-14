@@ -14,7 +14,7 @@ run: randtest
 
 randtest: randtest.c
 	@echo  "  CC      $<"
-	$(QUIET)$(GCC) $(CFLAGS) -o $@ $<
+	$(QUIET)$(GCC) $(CFLAGS) -o $@ $< -lm
 
 clean:
 	@echo  "  RM      randtest"
