@@ -10,7 +10,7 @@ all: randtest
 
 run: randtest
 	@echo  "  RUN     randtest"
-	$(QUIET)time ./randtest
+	$(QUIET)./randtest
 
 randtest: randtest.c
 	@echo  "  CC      $<"
