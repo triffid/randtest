@@ -33,7 +33,7 @@
 #include <sys/param.h>
 
 const int max = 32;             // number of faces on dice
-const long count = 1000000000;  // number of rolls per thread
+const long count = 10000000000;  // number of rolls per thread
 const int nthreads = 16;        // number of threads
 
 void siprefix(double value, double* display, char* prefix) {
@@ -85,6 +85,7 @@ void* threadfn(void* arg) {
 		lhitcount[rand]++;
 
 		// update mean and sd
+		// TODO: this float math takes twice as long as the PRNG proper, rewrite to calculate afterwards outside the loop
 		lmean += (rand * 1.0) / count;
 		lsd   += sq(rand - max * 0.5 - 0.5) / count / nthreads;
 
