@@ -14,8 +14,8 @@
 
 #include <sys/param.h>
 
-const int max = 37;             // number of faces on die
-const long count = 10000000000;  // number of rolls per thread
+const int max = 32;             // number of faces on dice
+const long count = 1000000000;  // number of rolls per thread
 const int nthreads = 16;        // number of threads
 
 void siprefix(double value, double* display, char* prefix) {
@@ -24,10 +24,17 @@ void siprefix(double value, double* display, char* prefix) {
 	*prefix = "qryzafpnum_kMGTPEZYRQ"[((int) gr) + 10];
 }
 
+inline double sq(double a) { return a*a; }
+
 // PRNG
+// NOTE: runs 23% slower than manual inline at -O0 and -O1, parity at -O2 and -O3
+static inline uint32_t PRNG_fetch(uint32_t max, uint64_t* seed) __attribute__ ((always_inline));
 static inline uint32_t PRNG_fetch(uint32_t max, uint64_t* seed) {
 	*seed += (*seed * *seed) | 5u;
 	return ((*seed >> 32u) * max) >> 32u;
+	// https://en.wikipedia.org/wiki/Lehmer_random_number_generator
+	// *seed = ((*seed * 48271) % 0x7FFFFFFF);
+	// return (*seed & 0x7FFFFFFF) % max;
 }
 
 typedef struct {
@@ -39,6 +46,7 @@ typedef struct {
 	// output from thread
 	uint64_t* hitcount;
 	double  * mean;
+	double  * sd;
 } threadinfo;
 
 void* threadfn(void* arg) {
@@ -49,19 +57,18 @@ void* threadfn(void* arg) {
 	uint64_t lseed = info.seed;
 	uint64_t lhitcount[max] = {};
 	double   lmean = 0;
+	double   lsd   = 0;
 
 	for (unsigned long i = 0; i < count; i++) {
-		// PRNG advance
-		lseed += (lseed * lseed) | 5u;
-		// fetch random from PRNG
-		uint32_t rand = ((lseed >> 32) * max) >> 32;
-		// uint32_t rand = PRNG_fetch(max, &lseed);
+		uint32_t rand = PRNG_fetch(max, &lseed);
+		// uint32_t rand = i % max;
 
 		// tally hit on received value
 		lhitcount[rand]++;
 
-		// update mean
+		// update mean and sd
 		lmean += (rand * 1.0) / count;
+		lsd   += sq(rand - max * 0.5 - 0.5) / count / nthreads;
 
 		// print progress occasionally
 		if ((i & ((1UL << 26) - 1)) == 0)
@@ -71,6 +78,7 @@ void* threadfn(void* arg) {
 	// marshall back to main thread, cache thrashing doesn't matter now
 	memcpy(info.hitcount, lhitcount, sizeof(lhitcount));
 	*info.mean = lmean;
+	*info.sd   = lsd;
 
 	return (void*) 0;
 }
@@ -79,10 +87,11 @@ int main(int argc, char** argv) {
 	uint64_t seed[nthreads];
 	uint64_t hitcount[nthreads][max];
 	double   mean[nthreads];
+	double   sd[nthreads];
 
 	int r = open("/dev/urandom", O_RDONLY);
 	if (r >= 0) {
-		read(r, seed, sizeof(seed));
+		int i = read(r, seed, sizeof(seed));
 		close(r);
 	}
 	else {
@@ -103,6 +112,7 @@ int main(int argc, char** argv) {
 			threads[i].seed = seed[i];
 			threads[i].hitcount = hitcount[i];
 			threads[i].mean = &mean[i];
+			threads[i].sd   = &sd[i];
 			if (pthread_create(&threads[i].thread, &attr, threadfn, &threads[i]) != 0)
 				return 1;
 		}
@@ -126,11 +136,19 @@ int main(int argc, char** argv) {
 
 	printf("\rExpected count: %lu                        \n", count * nthreads / max);
 
+	double allsd = 0;
+	double isd = 0;
+
 	for (int i = 0; i < max; i++) {
 		double permille = ((double) allhitcount[i]) / (count * nthreads / max) - 1.0;
+		allsd += sd[i];
+		isd += sq((i + 0.5) - (max * 0.5 - 0.5)) / max;
 		printf("[ %2d ] %lu (%+0.7f‰)%c", i, allhitcount[i], 1000.0 * permille, (((i & 3) == 3) || (i == (max - 1)))?'\n':'\t');
 	}
-	printf("mean: %f / %f (%+0.5f‰)\n", allmean, max * 0.5 - 0.5, 1000.0 * (allmean / (max * 0.5 - 0.5) - 1.0));
+	allsd = sqrt(allsd);
+	isd = sqrt(isd) * (9.287088 / 9.246621); // no idea why this correction factor is necessary, https://en.wikipedia.org/wiki/Bessel%27s_correction doesn't help because our sample size is _enormous_
+	printf("Σ/n (AM): %f / %f (%+0.5f‰)\n", allmean, max * 0.5 - 0.5, 1000.0 * (allmean / (max * 0.5 - 0.5) - 1.0));
+	printf("δ   (sd): %f / %f (%+0.5f‰)\n", allsd, isd, 1000.0 * (allsd - isd));
 
 	double runtime = endtime.tv_sec + (endtime.tv_nsec * 0.000000001) - starttime.tv_sec - (starttime.tv_nsec * 0.000000001);
 	double rate;
